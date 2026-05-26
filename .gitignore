@@ -1,0 +1,18 @@
+# PyInstaller build artifacts
+build/
+dist/
+*.spec
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Editor cruft
+.vscode/
+.idea/
+*.swp
+
+# Test fixtures
+/tmp/ks_test/
+/tmp/ks_env_test/
