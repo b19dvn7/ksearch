@@ -23,6 +23,7 @@ from pathlib import Path
 from PyQt5.QtCore import QProcess, Qt, QTimer, QVariant
 from PyQt5.QtGui import QColor, QFont, QPalette, QIcon, QKeySequence
 from PyQt5.QtWidgets import (
+    QAbstractItemView,
     QAction,
     QApplication,
     QCheckBox,
@@ -48,6 +49,8 @@ from PyQt5.QtWidgets import (
     QSplitter,
     QStatusBar,
     QStyle,
+    QTableWidget,
+    QTableWidgetItem,
     QTabWidget,
     QTreeWidget,
     QTreeWidgetItem,
@@ -388,6 +391,201 @@ class SortItem(QTreeWidgetItem):
             except (TypeError, ValueError):
                 pass
         return self.text(col) < other.text(col)
+
+
+def apply_replace(paths, find, replace, use_regex=False, backup=True, dry_run=True):
+    """Find/replace across multiple files.
+
+    Returns a list of dicts: [{path, changes:[(lineno, before, after)], err:str|None}]
+    Always reads the file UTF-8 (errors=replace); skips files larger than 25 MB.
+    """
+    try:
+        pat = re.compile(find if use_regex else re.escape(find))
+    except re.error as e:
+        return [{"path": "<regex>", "changes": [], "err": f"regex error: {e}"}]
+
+    out = []
+    for p in paths:
+        try:
+            if os.path.getsize(p) > 25 * 1024 * 1024:
+                out.append({"path": p, "changes": [], "err": "file > 25 MB, skipped"})
+                continue
+            text = Path(p).read_text(errors="replace")
+        except Exception as e:
+            out.append({"path": p, "changes": [], "err": str(e)})
+            continue
+
+        changes = []
+        new_lines = []
+        for i, line in enumerate(text.splitlines(keepends=True), 1):
+            new = pat.sub(replace, line)
+            if new != line:
+                changes.append((i, line.rstrip("\r\n"), new.rstrip("\r\n")))
+            new_lines.append(new)
+
+        err = None
+        if changes and not dry_run:
+            try:
+                if backup:
+                    Path(p + ".bak").write_text(text)
+                Path(p).write_text("".join(new_lines))
+            except Exception as e:
+                err = f"write failed: {e}"
+        out.append({"path": p, "changes": changes, "err": err})
+    return out
+
+
+class ReplaceDialog(QDialog):
+    """Multi-file find/replace with mandatory preview before apply."""
+
+    def __init__(self, parent, paths, suggested_find=""):
+        super().__init__(parent)
+        self.setWindowTitle(f"ksearch — Replace in {len(paths)} file(s)")
+        self.resize(900, 600)
+        self.paths = list(paths)
+        self._preview_ran = False
+        self._build(suggested_find)
+
+    def _build(self, suggested_find):
+        v = QVBoxLayout(self)
+
+        # selected files list (read-only summary)
+        info = QLabel(f"Operating on {len(self.paths)} file(s). Bold ones will be edited after Apply.")
+        info.setStyleSheet("color: #88c0ff;")
+        v.addWidget(info)
+
+        # find / replace inputs
+        form = QFormLayout()
+        self.find_in = QLineEdit(suggested_find)
+        self.find_in.setPlaceholderText("text or regex to find")
+        form.addRow("Find", self.find_in)
+
+        self.repl_in = QLineEdit()
+        self.repl_in.setPlaceholderText("replacement (use \\1 \\2 for regex captures)")
+        form.addRow("Replace with", self.repl_in)
+
+        opts = QHBoxLayout()
+        self.regex_cb = QCheckBox("Regex")
+        self.regex_cb.setToolTip("Treat Find as Python regex.")
+        self.backup_cb = QCheckBox(".bak backup before write")
+        self.backup_cb.setChecked(True)
+        opts.addWidget(self.regex_cb)
+        opts.addWidget(self.backup_cb)
+        opts.addStretch(1)
+        form.addRow(opts)
+        v.addLayout(form)
+
+        # preview table
+        v.addWidget(QLabel("Preview (Find must run before Apply enabled):"))
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(["File", "Line", "Before", "After"])
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Interactive)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+        self.table.setColumnWidth(0, 280)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setFont(QFont("monospace", 9))
+        v.addWidget(self.table, 1)
+
+        self.status_lbl = QLabel("")
+        v.addWidget(self.status_lbl)
+
+        row = QHBoxLayout()
+        self.preview_btn = QPushButton("Preview")
+        self.preview_btn.setToolTip("Dry-run. Required before Apply.")
+        self.preview_btn.clicked.connect(self._do_preview)
+        self.apply_btn = QPushButton("Apply changes")
+        self.apply_btn.setToolTip("Write changes to disk.")
+        self.apply_btn.setEnabled(False)
+        self.apply_btn.clicked.connect(self._do_apply)
+        cancel = QPushButton("Close")
+        cancel.clicked.connect(self.reject)
+        row.addWidget(self.preview_btn)
+        row.addWidget(self.apply_btn)
+        row.addStretch(1)
+        row.addWidget(cancel)
+        v.addLayout(row)
+
+        # any change to find/replace invalidates the preview
+        for w in (self.find_in, self.repl_in):
+            w.textChanged.connect(self._invalidate)
+        self.regex_cb.toggled.connect(self._invalidate)
+
+    def _invalidate(self):
+        self._preview_ran = False
+        self.apply_btn.setEnabled(False)
+        self.status_lbl.setText("(preview out of date — click Preview again)")
+
+    def _do_preview(self):
+        find = self.find_in.text()
+        if not find:
+            QMessageBox.warning(self, "Empty find", "Enter something to find.")
+            return
+        results = apply_replace(
+            self.paths,
+            find,
+            self.repl_in.text(),
+            use_regex=self.regex_cb.isChecked(),
+            backup=False,
+            dry_run=True,
+        )
+        self._fill_table(results)
+        total_changes = sum(len(r["changes"]) for r in results)
+        files_changed = sum(1 for r in results if r["changes"])
+        errs = sum(1 for r in results if r["err"])
+        self.status_lbl.setText(
+            f"Preview: {files_changed} file(s) would change, "
+            f"{total_changes} line(s) total, {errs} error(s)."
+        )
+        self._preview_ran = total_changes > 0
+        self.apply_btn.setEnabled(self._preview_ran)
+
+    def _do_apply(self):
+        if not self._preview_ran:
+            QMessageBox.warning(self, "Preview first", "Run Preview before Apply.")
+            return
+        if QMessageBox.question(
+            self,
+            "Confirm apply",
+            "This will modify files on disk.\nContinue?",
+        ) != QMessageBox.Yes:
+            return
+        results = apply_replace(
+            self.paths,
+            self.find_in.text(),
+            self.repl_in.text(),
+            use_regex=self.regex_cb.isChecked(),
+            backup=self.backup_cb.isChecked(),
+            dry_run=False,
+        )
+        files_changed = sum(1 for r in results if r["changes"] and not r["err"])
+        total_changes = sum(len(r["changes"]) for r in results if not r["err"])
+        errs = [r for r in results if r["err"]]
+        msg = f"Applied: {files_changed} file(s), {total_changes} line(s) changed."
+        if errs:
+            msg += "\n\nErrors:\n" + "\n".join(f"  {r['path']}: {r['err']}" for r in errs[:8])
+        QMessageBox.information(self, "Done", msg)
+        self.status_lbl.setText(msg.replace("\n", "  "))
+        self._preview_ran = False
+        self.apply_btn.setEnabled(False)
+
+    def _fill_table(self, results):
+        self.table.setRowCount(0)
+        for r in results:
+            if r["err"]:
+                row = self.table.rowCount()
+                self.table.insertRow(row)
+                self.table.setItem(row, 0, QTableWidgetItem(r["path"]))
+                self.table.setItem(row, 2, QTableWidgetItem(f"<ERROR: {r['err']}>"))
+                continue
+            for ln, before, after in r["changes"]:
+                row = self.table.rowCount()
+                self.table.insertRow(row)
+                self.table.setItem(row, 0, QTableWidgetItem(r["path"]))
+                self.table.setItem(row, 1, QTableWidgetItem(str(ln)))
+                self.table.setItem(row, 2, QTableWidgetItem(before[:400]))
+                self.table.setItem(row, 3, QTableWidgetItem(after[:400]))
 
 
 def detect_editor():
@@ -1201,6 +1399,7 @@ class SearchWindow(QMainWindow):
         self.tree.sortByColumn(1, Qt.DescendingOrder)
         self.tree.setAlternatingRowColors(True)
         self.tree.setFont(QFont("monospace", 9))
+        self.tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.tree.itemDoubleClicked.connect(self._on_item_activated)
         self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._tree_menu)
@@ -1806,17 +2005,47 @@ class SearchWindow(QMainWindow):
         meta = item.data(0, Qt.UserRole + 1)
         if not meta:
             return
+
+        # collect all selected file paths (dedupe)
+        selected_paths = []
+        seen = set()
+        for it in self.tree.selectedItems():
+            mm = it.data(0, Qt.UserRole + 1)
+            if not mm:
+                continue
+            p = mm.get("path")
+            if p and p not in seen:
+                seen.add(p)
+                selected_paths.append(p)
+        if not selected_paths:
+            selected_paths = [meta["path"]]
+
         m = QMenu(self)
         a_file = m.addAction("Open file in editor")
         a_folder = m.addAction("Open containing folder")
-        a_copy = m.addAction("Copy path")
+        a_copy = m.addAction("Copy path(s)")
+        m.addSeparator()
+        a_replace = m.addAction(f"Replace in {len(selected_paths)} selected file(s)...")
+        a_copy_all = m.addAction("Copy all selected paths (newline-separated)")
+
         chosen = m.exec_(self.tree.viewport().mapToGlobal(pos))
         if chosen == a_file:
             self.open_file(meta["path"], int(meta.get("line", 1) or 1))
         elif chosen == a_folder:
             self.open_folder(meta["path"])
         elif chosen == a_copy:
-            QApplication.clipboard().setText(meta["path"])
+            QApplication.clipboard().setText("\n".join(selected_paths))
+        elif chosen == a_copy_all:
+            QApplication.clipboard().setText("\n".join(selected_paths))
+        elif chosen == a_replace:
+            self._open_replace(selected_paths)
+
+    def _open_replace(self, paths):
+        if not paths:
+            return
+        # pre-fill Find with the current search query (literal mode by default)
+        dlg = ReplaceDialog(self, paths, suggested_find=self._current_query or "")
+        dlg.exec_()
 
     # -- open helpers --
 
