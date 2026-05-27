@@ -125,6 +125,7 @@ DEFAULT_CONFIG = {
     "use_nice": True,
     "use_ionice": True,
     "editor_cmd": "",          # blank = auto-detect
+    "file_manager_cmd": "",    # blank = auto-detect
     "flush_ms": 150,
     "group_by_folder": False,
     "show_preview": True,
@@ -623,6 +624,26 @@ def detect_all_editors():
     return out
 
 
+# File managers that support highlighting a specific file in its parent folder
+FILE_MANAGER_CANDIDATES = [
+    ("Files (Nautilus)", "nautilus", "select"),   # supports --select
+    ("Nemo",             "nemo",     "select"),   # supports --select
+    ("Dolphin",          "dolphin",  "select"),   # supports --select
+    ("Caja",             "caja",     "openfile"), # passing file opens parent + highlights
+    ("Thunar",           "thunar",   "folder"),   # no highlight
+    ("PCManFM",          "pcmanfm",  "folder"),
+]
+
+
+def detect_file_manager():
+    """Return (label, path, mode) for first available FM, prefers --select capable."""
+    for label, cmd, mode in FILE_MANAGER_CANDIDATES:
+        p = shutil.which(cmd)
+        if p:
+            return label, p, mode
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Query expansion (partial-match support)
 # ---------------------------------------------------------------------------
@@ -962,9 +983,47 @@ class SettingsDialog(QDialog):
         self.show_preview.setChecked(self.cfg["show_preview"])
         form.addRow(self.show_preview)
 
-        self.editor_cmd = QLineEdit(self.cfg.get("editor_cmd", ""))
-        self.editor_cmd.setPlaceholderText("blank = auto-detect")
-        form.addRow("Editor command", self.editor_cmd)
+        # Editor picker: combo populated with detected editors, also accepts custom command
+        self.editor_cmd = QComboBox()
+        self.editor_cmd.setEditable(True)
+        self.editor_cmd.addItem("auto-detect (default)", "")
+        for label, ed_path in detect_all_editors():
+            self.editor_cmd.addItem(f"{label}  ({ed_path})", ed_path)
+        current_ed = self.cfg.get("editor_cmd", "")
+        if current_ed:
+            # try to find matching entry
+            idx = self.editor_cmd.findData(current_ed)
+            if idx >= 0:
+                self.editor_cmd.setCurrentIndex(idx)
+            else:
+                self.editor_cmd.setEditText(current_ed)
+        self.editor_cmd.setToolTip(
+            "Default editor for double-click and 'Open file in editor (default)'.\n"
+            "Pick from detected editors or type a custom command."
+        )
+        form.addRow("Default editor", self.editor_cmd)
+
+        # File manager picker
+        self.file_manager_cmd = QComboBox()
+        self.file_manager_cmd.setEditable(True)
+        self.file_manager_cmd.addItem("auto-detect (default)", "")
+        for label, cmd, mode in FILE_MANAGER_CANDIDATES:
+            p = shutil.which(cmd)
+            if p:
+                tag = "  [highlights file]" if mode in ("select", "openfile") else ""
+                self.file_manager_cmd.addItem(f"{label}  ({p}){tag}", p)
+        current_fm = self.cfg.get("file_manager_cmd", "")
+        if current_fm:
+            idx = self.file_manager_cmd.findData(current_fm)
+            if idx >= 0:
+                self.file_manager_cmd.setCurrentIndex(idx)
+            else:
+                self.file_manager_cmd.setEditText(current_fm)
+        self.file_manager_cmd.setToolTip(
+            "File manager for 'Open containing folder'.\n"
+            "Editors marked [highlights file] will select the file in its parent folder."
+        )
+        form.addRow("File manager", self.file_manager_cmd)
         return w
 
     # ---- Appearance tab ----
@@ -1197,7 +1256,8 @@ class SettingsDialog(QDialog):
         self.use_ionice.setChecked(DEFAULT_CONFIG["use_ionice"])
         self.group_by_folder.setChecked(DEFAULT_CONFIG["group_by_folder"])
         self.show_preview.setChecked(DEFAULT_CONFIG["show_preview"])
-        self.editor_cmd.setText("")
+        self.editor_cmd.setCurrentIndex(0)  # auto-detect
+        self.file_manager_cmd.setCurrentIndex(0)
         self.file_types.setText(DEFAULT_CONFIG["file_types_whitelist"])
         self.excluded_extensions.setText(DEFAULT_CONFIG["excluded_extensions"])
         self.excluded_filenames.setText(DEFAULT_CONFIG["excluded_filenames"])
@@ -1235,7 +1295,14 @@ class SettingsDialog(QDialog):
             "use_ionice": self.use_ionice.isChecked(),
             "group_by_folder": self.group_by_folder.isChecked(),
             "show_preview": self.show_preview.isChecked(),
-            "editor_cmd": self.editor_cmd.text().strip(),
+            "editor_cmd": (self.editor_cmd.currentData()
+                            if self.editor_cmd.currentIndex() >= 0
+                            and self.editor_cmd.currentText() == self.editor_cmd.itemText(self.editor_cmd.currentIndex())
+                            else self.editor_cmd.currentText().strip()),
+            "file_manager_cmd": (self.file_manager_cmd.currentData()
+                            if self.file_manager_cmd.currentIndex() >= 0
+                            and self.file_manager_cmd.currentText() == self.file_manager_cmd.itemText(self.file_manager_cmd.currentIndex())
+                            else self.file_manager_cmd.currentText().strip()),
             "file_types_whitelist": self.file_types.text().strip(),
             "excluded_extensions": self.excluded_extensions.text().strip(),
             "excluded_filenames": self.excluded_filenames.text().strip(),
@@ -2172,15 +2239,41 @@ class SearchWindow(QMainWindow):
         if self.cfg.get("use_learning", True):
             record_click(self.learning, path, self._current_query)
             save_learning(self.learning)
+        try:
+            self._reveal_in_file_manager(path)
+        except Exception as e:
+            QMessageBox.warning(self, "Open failed", f"{e}")
+
+    def _reveal_in_file_manager(self, path):
+        """Open the parent folder and, if the FM supports it, highlight the file."""
+        # If the user set a custom FM cmd, honor it (assume it accepts path arg)
+        custom = self.cfg.get("file_manager_cmd", "").strip()
+        is_file = os.path.isfile(path)
+
+        if custom:
+            subprocess.Popen([custom, path], close_fds=True)
+            return
+
+        fm = detect_file_manager()
+        if fm and is_file:
+            _label, fm_path, mode = fm
+            if mode == "select":
+                subprocess.Popen([fm_path, "--select", path], close_fds=True)
+                return
+            if mode == "openfile":
+                subprocess.Popen([fm_path, path], close_fds=True)
+                return
+
+        # plain folder open: dirname if file, else path itself
         folder = path if os.path.isdir(path) else os.path.dirname(path)
+        if fm:
+            subprocess.Popen([fm[1], folder], close_fds=True)
+            return
         opener = shutil.which("xdg-open") or shutil.which("gio")
         if not opener:
             QMessageBox.warning(self, "No opener", "xdg-open not available.")
             return
-        try:
-            subprocess.Popen([opener, folder], close_fds=True)
-        except Exception as e:
-            QMessageBox.warning(self, "Open failed", f"{e}")
+        subprocess.Popen([opener, folder], close_fds=True)
 
     # -- settings --
 
