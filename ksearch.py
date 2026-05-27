@@ -90,6 +90,8 @@ DEFAULT_EXCLUDES = [
 ]
 
 DEFAULT_FILE_TYPES = ""  # empty = no whitelist, search all
+DEFAULT_EXCLUDED_EXTENSIONS = "pyc,pyo,log,bak,swp,swo,tmp,cache,lock,min.js,min.css"
+DEFAULT_EXCLUDED_FILENAMES = "package-lock.json,yarn.lock,Cargo.lock,poetry.lock,Pipfile.lock,.DS_Store"
 
 STOPWORDS = {"a", "an", "the", "of", "to", "in", "on", "at", "is", "it", "and", "or"}
 MIN_QUERY_LEN = 2
@@ -118,6 +120,8 @@ DEFAULT_CONFIG = {
     "max_filesize_mb": 5,
     "excludes": DEFAULT_EXCLUDES,
     "file_types_whitelist": DEFAULT_FILE_TYPES,
+    "excluded_extensions": DEFAULT_EXCLUDED_EXTENSIONS,
+    "excluded_filenames": DEFAULT_EXCLUDED_FILENAMES,
     "use_nice": True,
     "use_ionice": True,
     "editor_cmd": "",          # blank = auto-detect
@@ -698,6 +702,20 @@ def build_rg_args(regex, mode, root, cfg):
     for ex in cfg.get("excludes", []):
         args += ["-g", f"!{ex}"]
 
+    # exclude by extension
+    exts = [t.strip().lstrip(".") for t in (cfg.get("excluded_extensions") or "").split(",") if t.strip()]
+    for t in exts:
+        args += ["-g", f"!*.{t}"]
+
+    # exclude by filename / glob pattern (matches anywhere in tree)
+    names = [n.strip() for n in (cfg.get("excluded_filenames") or "").split(",") if n.strip()]
+    for n in names:
+        # if no glob chars, match the bare filename anywhere; else use as-is
+        if not any(c in n for c in "*?["):
+            args += ["-g", f"!**/{n}"]
+        else:
+            args += ["-g", f"!{n}"]
+
     types = [t.strip().lstrip(".") for t in (cfg.get("file_types_whitelist") or "").split(",") if t.strip()]
     for t in types:
         args += ["-g", f"*.{t}"]
@@ -711,11 +729,16 @@ def build_fd_args(regex, mode, root, cfg):
     if mode != "fast":
         args += ["--no-ignore", "--hidden"]
     for ex in cfg.get("excludes", []):
-        # fd uses --exclude with glob fragments; we strip leading /**
         token = ex.lstrip("/").rstrip("/")
         token = re.sub(r"^\*\*/", "", token).rstrip("/*")
         if token:
             args += ["--exclude", token]
+    # extension excludes
+    for t in [x.strip().lstrip(".") for x in (cfg.get("excluded_extensions") or "").split(",") if x.strip()]:
+        args += ["--exclude", f"*.{t}"]
+    # filename excludes
+    for n in [x.strip() for x in (cfg.get("excluded_filenames") or "").split(",") if x.strip()]:
+        args += ["--exclude", n]
     args += [regex, root]
     return wrap_low_priority(args, cfg)
 
@@ -875,6 +898,16 @@ class SettingsDialog(QDialog):
         self.file_types = QLineEdit(self.cfg.get("file_types_whitelist", ""))
         self.file_types.setPlaceholderText("blank = all (e.g. py,md,txt,json)")
         form.addRow("File type whitelist", self.file_types)
+
+        self.excluded_extensions = QLineEdit(self.cfg.get("excluded_extensions", ""))
+        self.excluded_extensions.setPlaceholderText("comma-separated, no dot (e.g. log,bak,swp)")
+        self.excluded_extensions.setToolTip("Skip files with these extensions.")
+        form.addRow("Excluded extensions", self.excluded_extensions)
+
+        self.excluded_filenames = QLineEdit(self.cfg.get("excluded_filenames", ""))
+        self.excluded_filenames.setPlaceholderText("exact names or globs (e.g. yarn.lock,*.min.js)")
+        self.excluded_filenames.setToolTip("Skip files with these names anywhere in tree.\nUse * ? [] for globs.")
+        form.addRow("Excluded filenames", self.excluded_filenames)
 
         form.addRow(QLabel("Excluded paths (rg glob, one per line):"))
         self.excludes = QPlainTextEdit("\n".join(self.cfg.get("excludes", [])))
@@ -1144,6 +1177,8 @@ class SettingsDialog(QDialog):
         self.show_preview.setChecked(DEFAULT_CONFIG["show_preview"])
         self.editor_cmd.setText("")
         self.file_types.setText(DEFAULT_CONFIG["file_types_whitelist"])
+        self.excluded_extensions.setText(DEFAULT_CONFIG["excluded_extensions"])
+        self.excluded_filenames.setText(DEFAULT_CONFIG["excluded_filenames"])
         self.excludes.setPlainText("\n".join(DEFAULT_EXCLUDES))
         self.theme.setCurrentText(DEFAULT_CONFIG["theme"])
         self.font_family.setCurrentFont(QFont(DEFAULT_CONFIG["font_family"]))
@@ -1180,6 +1215,8 @@ class SettingsDialog(QDialog):
             "show_preview": self.show_preview.isChecked(),
             "editor_cmd": self.editor_cmd.text().strip(),
             "file_types_whitelist": self.file_types.text().strip(),
+            "excluded_extensions": self.excluded_extensions.text().strip(),
+            "excluded_filenames": self.excluded_filenames.text().strip(),
             "excludes": ex,
             "theme": self.theme.currentText(),
             "font_family": self.font_family.currentFont().family(),
