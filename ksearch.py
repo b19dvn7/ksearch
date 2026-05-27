@@ -1363,14 +1363,6 @@ class SearchWindow(QMainWindow):
         self.settings_btn = QPushButton("Settings")
         self.settings_btn.setToolTip("Excludes, caps, priority...")
         self.settings_btn.clicked.connect(self.open_settings)
-        self.expand_btn = QPushButton("Expand all")
-        self.expand_btn.setToolTip("Open all file rows")
-        self.expand_btn.clicked.connect(self._expand_all)
-        self.collapse_btn = QPushButton("Collapse all")
-        self.collapse_btn.setToolTip("Collapse all file rows")
-        self.collapse_btn.clicked.connect(self._collapse_all)
-        opt.addWidget(self.expand_btn)
-        opt.addWidget(self.collapse_btn)
         opt.addWidget(self.search_btn)
         opt.addWidget(self.stop_btn)
         opt.addWidget(self.clear_btn)
@@ -1415,6 +1407,29 @@ class SearchWindow(QMainWindow):
         hp.addLayout(hb)
         splitter.addWidget(hist_panel)
 
+        # right pane: tree toolbar + tree
+        right_pane = QWidget()
+        right_v = QVBoxLayout(right_pane)
+        right_v.setContentsMargins(0, 0, 0, 0)
+        right_v.setSpacing(4)
+
+        tree_bar = QHBoxLayout()
+        self.results_label = QLabel("Results:")
+        self.results_label.setStyleSheet("color: #aaa;")
+        tree_bar.addWidget(self.results_label)
+        tree_bar.addStretch(1)
+        self.expand_btn = QPushButton("Expand all")
+        self.expand_btn.setToolTip("Open all file rows")
+        self.expand_btn.setFlat(True)
+        self.expand_btn.clicked.connect(self._expand_all)
+        self.collapse_btn = QPushButton("Collapse all")
+        self.collapse_btn.setToolTip("Collapse all file rows")
+        self.collapse_btn.setFlat(True)
+        self.collapse_btn.clicked.connect(self._collapse_all)
+        tree_bar.addWidget(self.expand_btn)
+        tree_bar.addWidget(self.collapse_btn)
+        right_v.addLayout(tree_bar)
+
         # results tree
         self.tree = QTreeWidget()
         self.tree.setColumnCount(4)
@@ -1440,7 +1455,8 @@ class SearchWindow(QMainWindow):
         self.tree.itemDoubleClicked.connect(self._on_item_activated)
         self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._tree_menu)
-        splitter.addWidget(self.tree)
+        right_v.addWidget(self.tree, 1)
+        splitter.addWidget(right_pane)
 
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
@@ -2011,12 +2027,14 @@ class SearchWindow(QMainWindow):
     def _tick_status(self):
         running = len(self.procs)
         cap = self.cfg["row_cap"]
+        files_n = len(self.results)
         self.status.showMessage(
-            f"files={len(self.results)}/{cap}  "
+            f"files={files_n}/{cap}  "
             f"content_hits={self.hits_content + len(self._content_buffer)}  "
             f"name_hits={self.hits_names + len(self._name_buffer)}  "
             f"running={running}"
         )
+        self.results_label.setText(f"Results: {files_n} file(s)")
 
     # -- tree interactions --
 
