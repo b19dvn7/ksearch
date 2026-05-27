@@ -2133,6 +2133,19 @@ class SearchWindow(QMainWindow):
     def _collapse_all(self):
         self.tree.collapseAll()
 
+    def _set_expanded_selected(self, expand):
+        """Expand or collapse just the highlighted file nodes."""
+        seen = set()
+        for it in self.tree.selectedItems():
+            # walk up to the top-level file node
+            node = it
+            while node.parent() is not None:
+                node = node.parent()
+            if id(node) in seen:
+                continue
+            seen.add(id(node))
+            node.setExpanded(expand)
+
     def _on_item_activated(self, item, _col):
         meta = item.data(0, Qt.UserRole + 1)
         if not meta:
@@ -2179,6 +2192,9 @@ class SearchWindow(QMainWindow):
         a_folder = m.addAction("Open containing folder")
         a_copy = m.addAction("Copy path(s)")
         m.addSeparator()
+        a_expand_sel = m.addAction(f"Expand selected ({len(selected_paths)})")
+        a_collapse_sel = m.addAction(f"Collapse selected ({len(selected_paths)})")
+        m.addSeparator()
         a_replace = m.addAction(f"Replace in {len(selected_paths)} selected file(s)...")
 
         chosen = m.exec_(self.tree.viewport().mapToGlobal(pos))
@@ -2194,6 +2210,10 @@ class SearchWindow(QMainWindow):
             self.open_folder(meta["path"])
         elif chosen == a_copy:
             QApplication.clipboard().setText("\n".join(selected_paths))
+        elif chosen == a_expand_sel:
+            self._set_expanded_selected(True)
+        elif chosen == a_collapse_sel:
+            self._set_expanded_selected(False)
         elif chosen == a_replace:
             self._open_replace(selected_paths)
 
