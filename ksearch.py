@@ -592,13 +592,35 @@ class ReplaceDialog(QDialog):
                 self.table.setItem(row, 3, QTableWidgetItem(after[:400]))
 
 
+EDITOR_CANDIDATES = [
+    ("VS Code",            "code"),
+    ("Sublime Text",       "subl"),
+    ("GNOME Text Editor",  "gnome-text-editor"),
+    ("gedit",              "gedit"),
+    ("Kate",               "kate"),
+    ("nano (terminal)",    "nano"),
+    ("vim (terminal)",     "vim"),
+    ("neovim (terminal)",  "nvim"),
+]
+
+
 def detect_editor():
-    """Pick a text editor for file open. Prefer GUI editors w/ line-jump."""
-    for cmd in ("code", "gedit", "gnome-text-editor", "kate", "subl"):
+    """Pick the first available GUI editor."""
+    for _label, cmd in EDITOR_CANDIDATES:
         p = shutil.which(cmd)
         if p:
             return p
     return shutil.which("xdg-open")
+
+
+def detect_all_editors():
+    """Return list of (label, path) for every editor present on PATH."""
+    out = []
+    for label, cmd in EDITOR_CANDIDATES:
+        p = shutil.which(cmd)
+        if p:
+            out.append((label, p))
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -2076,21 +2098,34 @@ class SearchWindow(QMainWindow):
             selected_paths = [meta["path"]]
 
         m = QMenu(self)
-        a_file = m.addAction("Open file in editor")
+        a_file = m.addAction("Open file in editor (default)")
+
+        # editor picker submenu
+        editors = detect_all_editors()
+        editor_actions = {}
+        if editors:
+            sub = m.addMenu("Open in editor with...")
+            for label, ed_path in editors:
+                act = sub.addAction(label)
+                editor_actions[act] = ed_path
+
         a_folder = m.addAction("Open containing folder")
         a_copy = m.addAction("Copy path(s)")
         m.addSeparator()
         a_replace = m.addAction(f"Replace in {len(selected_paths)} selected file(s)...")
-        a_copy_all = m.addAction("Copy all selected paths (newline-separated)")
 
         chosen = m.exec_(self.tree.viewport().mapToGlobal(pos))
         if chosen == a_file:
             self.open_file(meta["path"], int(meta.get("line", 1) or 1))
+        elif chosen in editor_actions:
+            self.open_file(
+                meta["path"],
+                int(meta.get("line", 1) or 1),
+                editor=editor_actions[chosen],
+            )
         elif chosen == a_folder:
             self.open_folder(meta["path"])
         elif chosen == a_copy:
-            QApplication.clipboard().setText("\n".join(selected_paths))
-        elif chosen == a_copy_all:
             QApplication.clipboard().setText("\n".join(selected_paths))
         elif chosen == a_replace:
             self._open_replace(selected_paths)
@@ -2104,12 +2139,12 @@ class SearchWindow(QMainWindow):
 
     # -- open helpers --
 
-    def open_file(self, path, line=1):
+    def open_file(self, path, line=1, editor=None):
         # adaptive learning: count this click
         if self.cfg.get("use_learning", True):
             record_click(self.learning, path, self._current_query)
             save_learning(self.learning)
-        editor = self.cfg.get("editor_cmd") or detect_editor()
+        editor = editor or self.cfg.get("editor_cmd") or detect_editor()
         if not editor:
             QMessageBox.warning(self, "No editor", "No editor found. Set one in Settings.")
             return
@@ -2119,8 +2154,14 @@ class SearchWindow(QMainWindow):
                 subprocess.Popen([editor, "--goto", f"{path}:{line}"], close_fds=True)
             elif "subl" in base:
                 subprocess.Popen([editor, f"{path}:{line}"], close_fds=True)
-            elif "gnome-text-editor" in base or "gedit" in base or "kate" in base:
-                subprocess.Popen([editor, path], close_fds=True)
+            elif base in ("vim", "nvim", "nano"):
+                # terminal editor: launch in a new terminal
+                term = shutil.which("gnome-terminal") or shutil.which("x-terminal-emulator") \
+                       or shutil.which("xterm")
+                if term:
+                    subprocess.Popen([term, "--", editor, f"+{line}", path], close_fds=True)
+                else:
+                    subprocess.Popen([editor, f"+{line}", path], close_fds=True)
             else:
                 subprocess.Popen([editor, path], close_fds=True)
         except Exception as e:
